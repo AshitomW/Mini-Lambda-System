@@ -14,7 +14,7 @@ import (
 type InvocationResult struct {
 	Output   string `json:"output"`
 	Logs     string `json:"logs"`
-	Duration time.Duration `json:duration_ms`
+	Duration time.Duration `json:"duration_ms"`
 }
 
 
@@ -44,7 +44,7 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 	},nil,nil,nil,"")
 
 	if err != nil {
-		return nil, fmt.Errorf("Create Container : %v",err)
+		return nil, fmt.Errorf("create container : %v",err)
 	}
 
 	defer func(){
@@ -79,7 +79,7 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 	select {
 	case <- ctx.Done():
 		_ = cli.ContainerStop(context.Background(),resp.ID,client.ContainerStopOptions{})
-		return nil, fmt.Errorf("Timeout Exceeded")
+		return nil, fmt.Errorf("timeout exceeded")
 	
 	case err := <-errCh:
 		if err != nil{
