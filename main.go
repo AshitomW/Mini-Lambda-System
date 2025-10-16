@@ -1,16 +1,39 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"net/http"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/moby/moby/client"
-	"github.com/moby/moby/api/types/container"
-
 )
 
 func main(){
-	fmt.Printf("Lambda System")
+	r := gin.Default();
+
+
+	// prometheus
+	r.GET("/metrics",gin.WrapH(promhttp.Handler()))
+	
+	// Lambda Routes
+
+	r.POST("/functions",handleRegister)
+	r.GET("/functions",handleList);
+	r.POST("/invoke/:id",handleInvoke);
+	
+
+
+	server := &http.Server{
+		Addr: ":8300",
+		Handler: r,
+		ReadTimeout: 20 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+
+
+	log.Println("Server Running On port 8080");
+	log.Fatal(server.ListenAndServe())
 }
 
