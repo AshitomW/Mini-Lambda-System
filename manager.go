@@ -72,7 +72,7 @@ func GetFunction(id string) (Function,error){
 	f, ok := functions[id]
 
 	if !ok {
-		return Function{},errors.New("Function Not Found!")
+		return Function{},errors.New("Function Not Found")
 	}
 
 	return f, nil
