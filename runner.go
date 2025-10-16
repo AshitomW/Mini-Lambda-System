@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,7 +22,7 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 	ctx, cancel := context.WithTimeout(context.Background(),time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	cli, err := client.NewClientWithOpts(client.FromEnv,client.WithAPIVersionNegotiation())
 
 	if err != nil{
 		return nil , err
@@ -35,6 +36,11 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 		Image: fn.Image,
 		Cmd: []string{},
 		Env: []string{},
+		AttachStdin: true,
+		AttachStdout: true,
+		AttachStderr: true,
+		OpenStdin: true,
+		StdinOnce: true,
 	},nil,nil,nil,"")
 
 	if err != nil {
@@ -45,25 +51,56 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 		_ = cli.ContainerRemove(context.Background(),resp.ID,client.ContainerRemoveOptions{Force: true})
 	}()
 
+	if err := cli.ContainerStart(ctx,resp.ID, client.ContainerStartOptions{}); err != nil {
+		return nil, err;
+	}
 
-	// feeding event into container's stdin through attach
+	hijack, err := cli.ContainerAttach(ctx,resp.ID,client.ContainerAttachOptions{
+		Stdin: true,
+		Stdout: true,
+		Stderr: true,
+		Stream: true,
+	})
 
-	go func(){
-		hijack, err := cli.ContainerAttach(ctx,resp.ID,client.ContainerAttachOptions{
-			Stdin: true,
-			Stdout: true,
-			Stderr: true,
-			Stream: true,
-		})
+	if err != nil {
+		return nil, fmt.Errorf("attach failed: %v", err)
+	}
+	defer hijack.Close()
+	
+	// Write event data
+	if len(eventData) > 0 {
+		hijack.Conn.Write(eventData)
+	}
+	hijack.CloseWrite()
 
-		if err != nil {
-			defer hijack.Close();
-			hijack.Conn.Write(eventData)
-			hijack.CloseWrite()
+	statusCh, errCh := cli.ContainerWait(ctx,resp.ID,container.WaitConditionNextExit)
+
+
+	select {
+	case <- ctx.Done():
+		_ = cli.ContainerStop(context.Background(),resp.ID,client.ContainerStopOptions{})
+		return nil, fmt.Errorf("Timeout Exceeded")
+	
+	case err := <-errCh:
+		if err != nil{
+			return nil, err
 		}
-	}()
+	case <-statusCh:
+	}
+
+	outLogs, _ := cli.ContainerLogs(context.Background(),resp.ID,client.ContainerLogsOptions{ShowStdout: true,ShowStderr: true})
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(outLogs)
+
+	duration := time.Since(start)
+	metricsInvocations.WithLabelValues(fn.Name).Inc()
+	metricsDuration.WithLabelValues(fn.Name).Observe(duration.Seconds() * 1000)
 
 
-
+	return &InvocationResult{
+		Output: buf.String(),
+		Logs: buf.String(),
+		Duration: duration/time.Millisecond,
+	},nil
 }
 

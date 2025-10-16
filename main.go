@@ -10,6 +10,7 @@ import (
 )
 
 func main(){
+	gin.SetMode(gin.DebugMode)
 	r := gin.Default();
 
 
@@ -33,7 +34,7 @@ func main(){
 	}
 
 
-	log.Println("Server Running On port 8080");
+	log.Println("Server Running On port 8300");
 	log.Fatal(server.ListenAndServe())
 }
 
