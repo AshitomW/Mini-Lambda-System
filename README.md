@@ -1,6 +1,7 @@
 # Mini Lambda System
 
-A lightweight serverless function execution system built with Go that runs functions in Docker containers. Similar to AWS Lambda but simplified for local development and testing.
+A hilariously unserious attempt at being AWS Lambda — built in Go, running container images on request, and pretending to be useful. It’s a lightweight serverless execution system for local experiments, hacky prototypes, and impressing exactly zero DevOps engineers.
+Think of it as Lambda’s chaotic younger sibling who runs on coffee, pulls random images on demand, skips production readiness checks, and proudly says, “Scaling? Never heard of her.”
 
 ## Features
 
