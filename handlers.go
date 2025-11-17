@@ -1,7 +1,9 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -65,5 +67,53 @@ func handleInvoke(ctx *gin.Context){
 		"duration":res.Duration,
 		"timestamp":time.Now(),
 	})
+
+}
+
+
+func handleImageUpload(ctx *gin.Context){
+	file, header, err := ctx.Request.FormFile("image")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error":"no docker image file provided"})
+		return 
+	}
+	defer file.Close()
+	
+	imageName := ctx.PostForm("name")
+	if imageName == ""{
+		ctx.JSON(http.StatusBadRequest,gin.H{"Error":"Docker Image Name Is Required"})
+		return 
+	}
+
+	tempFile, err := os.CreateTemp("","docker-image-*.tar")
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"Error":"Failed To Create A Temp File, Internal Error!!"})
+		return 
+	}
+
+	defer os.Remove(tempFile.Name())
+	defer tempFile.Close()
+
+
+	_, err = io.Copy(tempFile,file)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,gin.H{"Error":"Failed to Save File"})
+		return 
+	}
+
+
+
+	err = LoadDockerImage(tempFile.Name(),imageName)
+	if err != nil{
+		ctx.JSON(http.StatusInternalServerError,gin.H{"Error":"Failed to save File"})
+		return 
+	}
+
+
+	ctx.JSON(http.StatusOK,gin.H{
+		"message":"Image Uploaded Successfully",
+		"image_name":imageName,
+		"file_size":header.Size,
+	})	
 
 }
