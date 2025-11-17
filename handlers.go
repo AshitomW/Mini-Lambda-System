@@ -79,11 +79,6 @@ func handleImageUpload(ctx *gin.Context){
 	}
 	defer file.Close()
 	
-	imageName := ctx.PostForm("name")
-	if imageName == ""{
-		ctx.JSON(http.StatusBadRequest,gin.H{"Error":"Docker Image Name Is Required"})
-		return 
-	}
 
 	tempFile, err := os.CreateTemp("","docker-image-*.tar")
 	if err != nil {
@@ -103,7 +98,7 @@ func handleImageUpload(ctx *gin.Context){
 
 
 
-	err = LoadDockerImage(tempFile.Name(),imageName)
+	err = LoadDockerImage(tempFile.Name())
 	if err != nil{
 		ctx.JSON(http.StatusInternalServerError,gin.H{"Error":"Failed to save File"})
 		return 
@@ -112,7 +107,6 @@ func handleImageUpload(ctx *gin.Context){
 
 	ctx.JSON(http.StatusOK,gin.H{
 		"message":"Image Uploaded Successfully",
-		"image_name":imageName,
 		"file_size":header.Size,
 	})	
 

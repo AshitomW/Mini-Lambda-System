@@ -20,7 +20,7 @@ type InvocationResult struct {
 
 
 
-func LoadDockerImage(tarPath , imageName string) error {
+func LoadDockerImage(tarPath string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv,client.WithAPIVersionNegotiation())
 	if err != nil {
 		return fmt.Errorf("Failed to create docker client: %v",err)
