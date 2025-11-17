@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
@@ -16,6 +17,34 @@ type InvocationResult struct {
 	Logs     string `json:"logs"`
 	Duration time.Duration `json:"duration_ms"`
 }
+
+
+
+func LoadDockerImage(tarPath , imageName string) error {
+	cli, err := client.NewClientWithOpts(client.FromEnv,client.WithAPIVersionNegotiation())
+	if err != nil {
+		return fmt.Errorf("Failed to create docker client: %v",err)
+	}
+
+
+	file, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("Failed to open tar file: %v",err)
+	}
+
+
+	defer file.Close()
+
+	ctx:= context.Background()
+	_, err = cli.ImageLoad(ctx,file)
+	if err != nil {
+		return fmt.Errorf("Failed to load image: %v",err)
+	}
+
+	return nil
+}
+
+
 
 
 func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResult, error){
