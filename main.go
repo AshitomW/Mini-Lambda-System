@@ -22,6 +22,7 @@ func main(){
 	r.POST("/functions",handleRegister)
 	r.GET("/functions",handleList);
 	r.POST("/invoke/:id",handleInvoke);
+	r.POST("/images/upload",handleImageUpload);
 	
 
 
