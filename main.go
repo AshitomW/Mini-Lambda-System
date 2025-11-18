@@ -22,8 +22,8 @@ func main(){
 	r.POST("/functions",handleRegister)
 	r.GET("/functions",handleList);
 	r.POST("/invoke/:id",handleInvoke);
-	r.POST("/images/upload",handleImageUpload);
-	
+	r.POST("/images",handleImageUpload);
+	r.GET("/images",handleListDockerImages)
 
 
 	server := &http.Server{

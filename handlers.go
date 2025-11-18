@@ -31,6 +31,14 @@ func handleList(ctx *gin.Context){
 	ctx.JSON(http.StatusOK,ListFunction())
 }
 
+func handleListDockerImages(ctx *gin.Context){
+	images, err := ListAvailableDockerImages();
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError,gin.H{"error":"Failed to load images"})
+		return 
+	}
+	ctx.JSON(http.StatusOK,images)
+}
 
 type InvokeReq struct {
 	Event any `json:"event"`

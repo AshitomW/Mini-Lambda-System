@@ -90,3 +90,12 @@ func ListFunction() []Function{
 	}
 	return out
 }
+
+
+func ListAvailableDockerImages() ([]string,error) {
+	images, err := ListDockerImages()
+	if err != nil{
+		return nil, err
+	}
+	return images, nil
+}

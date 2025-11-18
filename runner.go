@@ -133,3 +133,26 @@ func InvokeDockerFunction(fn Function, payload any, timeout int)(*InvocationResu
 	},nil
 }
 
+
+func ListDockerImages()([]string, error){
+	cli, err := client.NewClientWithOpts(client.FromEnv,client.WithAPIVersionNegotiation())
+	if err != nil{
+		return nil, err 
+	}
+
+	ctx := context.Background()
+	images, err := cli.ImageList(ctx,client.ImageListOptions{})
+	if err != nil{
+		return nil, err 
+	}
+
+
+	var imageNames[] string 
+
+	for _, img := range images{
+		imageNames = append(imageNames,img.RepoTags...)
+	}
+
+	return imageNames, nil
+
+}
