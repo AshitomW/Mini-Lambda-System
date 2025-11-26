@@ -1,6 +1,6 @@
 # Mini Lambda System
 
-A hilariously unserious attempt at being AWS Lambda — built in Go, running container images on request, and pretending to be useful. It's a lightweight serverless execution system for local experiments, hacky prototypes, and impressing exactly zero DevOps engineers.
+It’s the kind of minimalist “serverless-but-not-really” toy that spins up containers on demand, pretends to orchestrate things, and confidently behaves like it belongs in a cloud brochure. It fetches images, fires them up, returns results, and then casually wanders off like it just performed a miracle. No promises, no guarantees, just vibes, enthusiasm, and the sheer audacity to call itself an execution platform.
 Think of it as Lambda's chaotic younger sibling who runs on coffee, pulls random images on demand, skips production readiness checks, and proudly says, "Scaling? Never heard of her."
 
 ## Features
@@ -8,7 +8,7 @@ Think of it as Lambda's chaotic younger sibling who runs on coffee, pulls random
 - Function registration and management
 - Docker-based function execution
 - Synchronous function invocation via RESTful API
-- **Async invocation infrastructure** (backend support kind of ready)
+- Async invocation infrastructure
 - Prometheus metrics integration with invocation counters and duration histograms
 - Timeout handling with configurable timeouts
 - JSON-based function persistence
