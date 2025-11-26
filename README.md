@@ -1,16 +1,19 @@
 # Mini Lambda System
 
-A hilariously unserious attempt at being AWS Lambda — built in Go, running container images on request, and pretending to be useful. It’s a lightweight serverless execution system for local experiments, hacky prototypes, and impressing exactly zero DevOps engineers.
-Think of it as Lambda’s chaotic younger sibling who runs on coffee, pulls random images on demand, skips production readiness checks, and proudly says, “Scaling? Never heard of her.”
+A hilariously unserious attempt at being AWS Lambda — built in Go, running container images on request, and pretending to be useful. It's a lightweight serverless execution system for local experiments, hacky prototypes, and impressing exactly zero DevOps engineers.
+Think of it as Lambda's chaotic younger sibling who runs on coffee, pulls random images on demand, skips production readiness checks, and proudly says, "Scaling? Never heard of her."
 
 ## Features
 
 - Function registration and management
 - Docker-based function execution
-- RESTful API for function invocation
-- Prometheus metrics integration
-- Timeout handling
+- Synchronous function invocation via RESTful API
+- **Async invocation infrastructure** (backend support kind of ready)
+- Prometheus metrics integration with invocation counters and duration histograms
+- Timeout handling with configurable timeouts
 - JSON-based function persistence
+- Docker image upload support
+- Concurrent function execution support
 
 ## Prerequisites
 
@@ -108,6 +111,25 @@ Response:
 }
 ```
 
+### 5. Upload Docker Images
+
+You can upload Docker images directly to the system:
+
+```bash
+# Save your Docker image to a tar file
+docker save my-function:latest > my-function.tar
+
+# Upload the image
+curl -X POST http://localhost:8300/images \
+  -F "image=@my-function.tar"
+```
+
+### 6. List Available Docker Images
+
+```bash
+curl http://localhost:8300/images
+```
+
 ## API Documentation
 
 ### Register Function
@@ -126,7 +148,7 @@ Response:
 - **GET** `/functions`
 - Returns array of all registered functions
 
-### Invoke Function
+### Invoke Function (Synchronous)
 
 - **POST** `/invoke/{function-id}`
 - **Body**:
@@ -136,11 +158,50 @@ Response:
     "timeout": 120 // Timeout in seconds (optional, default: 120)
   }
   ```
+- Returns immediate results with output, duration, and timestamp
+
+### Upload Docker Image
+
+- **POST** `/images`
+- **Form Data**:
+  - `image`: Docker image tar file
+- Uploads and loads a Docker image into the local Docker registry
+
+### List Available Docker Images
+
+- **GET** `/images`
+- Returns array of all available Docker images in the local registry
 
 ### Metrics
 
 - **GET** `/metrics`
-- Returns Prometheus metrics
+- Returns Prometheus metrics including:
+  - `Total_Invocations`: Counter of function invocations by function name
+  - `Invocation Duration ms`: Histogram of invocation durations in milliseconds
+
+## Architecture Overview
+
+### Function Execution Flow
+
+1. **Registration**: Functions are registered with a name and Docker image
+2. **Invocation**: When invoked, the system:
+   - Creates a new Docker container from the specified image
+   - Passes the JSON payload via stdin
+   - Captures stdout/stderr as output and logs
+   - Measures execution duration
+   - Records metrics
+   - Cleans up the container
+
+### Async Infrastructure
+
+The system includes backend support for asynchronous invocations with:
+
+- **Invocation Status Tracking**: PENDING → RUNNING → COMPLETED/FAILED
+- **Result Storage**: Output, logs, duration, and error information
+- **Concurrent Execution**: Multiple functions can run simultaneously
+- **Thread-Safe Operations**: Mutex-protected invocation management
+
+_Note: Async API endpoints are not yet implemented but the infrastructure is ready._
 
 ## Creating Custom Functions
 
@@ -151,6 +212,7 @@ Response:
 ```python
 import json
 import sys
+from datetime import datetime
 
 # Read input from stdin
 input_data = sys.stdin.read()
@@ -232,20 +294,26 @@ Your Docker function must:
 3. Exit with code 0 on success
 4. Handle empty/invalid input gracefully
 
-## Monitoring
+## Monitoring & Metrics
 
 Access Prometheus metrics at `http://localhost:8300/metrics` to monitor:
 
-- Total function invocations
-- Invocation duration
-- Function-specific metrics
+- **Total Invocations**: `Total_Invocations` counter by function name
+- **Invocation Duration**: `Invocation Duration ms` histogram with linear buckets (10ms-1000ms)
+- **Function Performance**: Per-function execution statistics
 
-## Configuration
+Example metrics output:
 
-- **Port**: 8300 (hardcoded in main.go)
-- **Default Timeout**: 120 seconds
-- **Data Directory**: `./function/` (for persistence)
-- **Max Container Runtime**: Based on timeout parameter
+```
+# HELP Total_Invocations Number of function invocations
+# TYPE Total_Invocations counter
+Total_Invocations{function="hello-python"} 5
+
+# HELP Invocation Duration ms Invocation latency in ms
+# TYPE Invocation Duration ms histogram
+Invocation Duration ms_bucket{function="hello-python",le="10"} 0
+Invocation Duration ms_bucket{function="hello-python",le="110"} 2
+```
 
 ## Troubleshooting
 
@@ -256,19 +324,28 @@ Access Prometheus metrics at `http://localhost:8300/metrics` to monitor:
 
 ### Container Execution Issues
 
-- Verify Docker is running
+- Verify Docker is running: `docker ps`
 - Check that the Docker image exists: `docker images`
-- Ensure the Docker image is executable
+- Ensure the Docker image is executable and has proper CMD/ENTRYPOINT
 
 ### Timeout Issues
 
 - Increase the timeout parameter in your invoke request
 - Check function logs for performance bottlenecks
+- Monitor execution time via `/metrics`
 
-## Development
+### Image Upload Issues
 
-To modify the system:
+- Ensure the uploaded file is a valid Docker tar export
+- Check file size limits and available disk space
+- Verify the tar file was created with `docker save`
 
-1. Edit the Go source files
-2. Restart the server: `go run .`
-3. Test with the provided examples
+## Future Enhancements
+
+- REST API endpoints for async invocation management
+- Function versioning support
+- Resource limits and quotas
+- Log aggregation and search
+- Function scaling and load balancing
+- Authentication and authorization
+- Function marketplace/registry
