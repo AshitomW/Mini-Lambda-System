@@ -119,3 +119,49 @@ func handleImageUpload(ctx *gin.Context){
 	})	
 
 }
+
+
+func handleAsyncInvoke(ctx *gin.Context){
+	id := ctx.Param("id")
+	var req InvokeReq
+
+	if err := ctx.BindJSON(&req); err != nil{
+		ctx.JSON(http.StatusNotFound,gin.H{"error":err.Error()})
+		return 
+	}
+
+
+	invocation := StartAsyncInvocation(id, req.Event,req.Timeout)
+
+	ctx.JSON(http.StatusAccepted, gin.H{
+		"invocation_id": invocation.ID,
+		"status":invocation.Status,
+		"created_at":invocation.CreatedAt,
+	})
+
+}
+
+
+
+func handleGetAsyncInvocation(ctx *gin.Context){
+	invocationId := ctx.Param("invocation_id")
+	invocation,err := GetAsyncInvocation(invocationId)
+
+
+	if err != nil{
+		ctx.JSON(http.StatusNotFound,gin.H{"error":err.Error()})
+		return 
+	}
+
+
+	ctx.JSON(http.StatusOK,invocation)
+
+}
+
+
+
+
+func handleListAsyncInvocations(ctx *gin.Context){
+	invocatoins := ListAsyncInvocations()
+	ctx.JSON(http.StatusOK,invocatoins)
+}

@@ -25,6 +25,11 @@ func main(){
 	r.POST("/images",handleImageUpload);
 	r.GET("/images",handleListDockerImages)
 
+	r.POST("/invoke/:id/async",handleAsyncInvoke)
+	r.POST("/invocations/:invocation_id",handleGetAsyncInvocation)
+	r.GET("/invocations",handleListAsyncInvocations) // Lists all async invocations only , not histor 
+
+
 
 	server := &http.Server{
 		Addr: ":8300",
@@ -33,7 +38,6 @@ func main(){
 		WriteTimeout: 15 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
-
 
 	log.Println("Server Running On port 8300");
 	log.Fatal(server.ListenAndServe())

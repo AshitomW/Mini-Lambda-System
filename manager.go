@@ -99,3 +99,42 @@ func ListAvailableDockerImages() ([]string,error) {
 	}
 	return images, nil
 }
+
+
+func GetAsyncInvocation(id string)(*AsyncInvocation,error){
+	invocationsMutex.Lock()
+	defer invocationsMutex.Unlock()
+
+	invocation, exists := asyncInvocations[id] 
+
+	if !exists {
+		return nil, errors.New("invocation not found")
+	}
+
+
+	return  invocation, nil 
+
+}
+
+
+func ListAsyncInvocations()[]*AsyncInvocation{
+	 invocationsMutex.Lock()
+	 defer invocationsMutex.Unlock()
+
+
+
+	result := make([]*AsyncInvocation,0,len(asyncInvocations))
+
+
+	for _ , inv := range asyncInvocations{
+		result = append(result,inv)
+	}
+
+	return result 
+
+
+}
+
+
+
+
