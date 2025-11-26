@@ -81,6 +81,9 @@ func StartAsyncInvocation(functionID string, payload any, timeout int) *AsyncInv
 			return 
 		}
 
+	
+
+
 		result, err := InvokeDockerFunction(fn,payload,timeout)
 
 		invocation.mutex.Lock()

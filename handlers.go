@@ -126,12 +126,21 @@ func handleAsyncInvoke(ctx *gin.Context){
 	var req InvokeReq
 
 	if err := ctx.BindJSON(&req); err != nil{
-		ctx.JSON(http.StatusNotFound,gin.H{"error":err.Error()})
+		ctx.JSON(http.StatusBadRequest,gin.H{"error":"invalid json"})
 		return 
 	}
 
+	if req.Timeout == 0 {
+		req.Timeout = 120
+	}
 
-	invocation := StartAsyncInvocation(id, req.Event,req.Timeout)
+	_, err := GetFunction(id)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	invocation := StartAsyncInvocation(id, req.Event, req.Timeout)
 
 	ctx.JSON(http.StatusAccepted, gin.H{
 		"invocation_id": invocation.ID,
