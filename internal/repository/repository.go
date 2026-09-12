@@ -21,4 +21,5 @@ type InvocationRepository interface {
 	GetByID(ctx context.Context, id string) (domain.AsyncInvocation, error)
 	Update(ctx context.Context, inv domain.AsyncInvocation) error
 	List(ctx context.Context) ([]domain.AsyncInvocation, error)
+	ListDeadLetter(ctx context.Context) ([]domain.AsyncInvocation, error)
 }

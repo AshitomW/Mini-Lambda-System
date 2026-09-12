@@ -297,16 +297,16 @@ func toKubeEnv(env map[string]string) []EnvVar {
 }
 
 func sanitizeKubeName(name string) string {
-	lowered := strings.ToLower(name)
-	var sb strings.Builder
-	for _, r := range lowered {
+	res := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			sb.WriteRune(r)
-		} else {
-			sb.WriteRune('-')
+			return r
 		}
-	}
-	res := strings.Trim(sb.String(), "-")
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, name)
+	res = strings.Trim(res, "-")
 	if res == "" {
 		return "function"
 	}

@@ -8,6 +8,9 @@ import (
 func NewRouter(h *Handler) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(TracingMiddleware())
+	r.Use(MTLSIdentityMiddleware())
+	r.Use(RBACAuthMiddleware(h.cfg.AuthEnabled, h.cfg.AdminAPIKey, h.cfg.InvokerAPIKey))
 
 	r.GET("/health", h.HealthCheck)
 	r.GET("/metrics", gin.WrapH(h.metrics.Handler()))
@@ -21,6 +24,8 @@ func NewRouter(h *Handler) *gin.Engine {
 	r.POST("/invoke/:id/async", h.InvokeAsync)
 	r.POST("/hooks/:identifier", h.HandleWebhook)
 
+	r.GET("/invocations/dlq", h.ListDeadLetter)
+	r.POST("/invocations/:invocation_id/retry", h.RetryDeadLetter)
 	r.GET("/invocations/:invocation_id", h.GetAsyncInvocation)
 	r.POST("/invocations/:invocation_id", h.GetAsyncInvocation)
 	r.GET("/invocations", h.ListAsyncInvocations)

@@ -4,6 +4,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +45,37 @@ func WithHTTPClient(httpClient *http.Client) Option {
 func WithCustomHeader(key, value string) Option {
 	return func(c *Client) {
 		c.headers.Set(key, value)
+	}
+}
+
+// WithAPIKey configures the client to authenticate using a Bearer token or API key.
+func WithAPIKey(apiKey string) Option {
+	return func(c *Client) {
+		c.headers.Set("Authorization", "Bearer "+apiKey)
+	}
+}
+
+// WithMutualTLS configures the client HTTP transport with client certificate and CA certificate for mTLS.
+func WithMutualTLS(clientCertPEM, clientKeyPEM, caCertPEM []byte) Option {
+	return func(c *Client) {
+		cert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+		if err != nil {
+			return
+		}
+
+		caPool := x509.NewCertPool()
+		if len(caCertPEM) > 0 {
+			caPool.AppendCertsFromPEM(caCertPEM)
+		}
+
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      caPool,
+				MinVersion:   tls.VersionTLS13,
+			},
+		}
+		c.httpClient.Transport = tr
 	}
 }
 
@@ -425,6 +458,56 @@ func (c *Client) HealthCheck(ctx context.Context) (bool, error) {
 	defer resp.Body.Close()
 
 	return resp.StatusCode == http.StatusOK, nil
+}
+
+// ListDeadLetterInvocations retrieves all invocations currently in the Dead Letter Queue.
+func (c *Client) ListDeadLetterInvocations(ctx context.Context) ([]domain.AsyncInvocation, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/invocations/dlq", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.parseError(resp)
+	}
+
+	var invocations []domain.AsyncInvocation
+	if err := json.NewDecoder(resp.Body).Decode(&invocations); err != nil {
+		return nil, fmt.Errorf("failed to decode dead letter invocations: %w", err)
+	}
+	return invocations, nil
+}
+
+// RetryDeadLetter requests re-execution of a failed or dead-lettered async invocation.
+func (c *Client) RetryDeadLetter(ctx context.Context, invocationID string) (*AsyncInvokeResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/invocations/"+invocationID+"/retry", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.applyHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		return nil, c.parseError(resp)
+	}
+
+	var result AsyncInvokeResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode retry response: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *Client) applyHeaders(req *http.Request) {

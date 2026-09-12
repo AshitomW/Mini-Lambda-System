@@ -56,6 +56,12 @@ func (r *DockerRunner) Invoke(ctx context.Context, fn domain.Function, payload [
 		memLimit = fn.MemoryMB * 1024 * 1024
 	}
 
+	networkMode := "none"
+	if fn.AllowNetwork || r.cfg.ContainerNetworkEnabled {
+		networkMode = "bridge"
+	}
+	pidsLimit := int64(100)
+
 	resp, err := r.client.ContainerCreate(execCtx, &container.Config{
 		Image:        fn.Image,
 		Env:          invCtx.ToEnvSlice(),
@@ -65,9 +71,14 @@ func (r *DockerRunner) Invoke(ctx context.Context, fn domain.Function, payload [
 		OpenStdin:    true,
 		StdinOnce:    true,
 	}, &container.HostConfig{
+		NetworkMode: container.NetworkMode(networkMode),
+		CapDrop:     []string{"ALL"},
+		SecurityOpt: []string{"no-new-privileges:true"},
+		Tmpfs:       map[string]string{"/tmp": "rw,noexec,nosuid,size=64m"},
 		Resources: container.Resources{
 			Memory:    memLimit,
 			CPUShares: r.cfg.CPUShares,
+			PidsLimit: &pidsLimit,
 		},
 	}, nil, nil, "")
 	if err != nil {
