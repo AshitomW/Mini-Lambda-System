@@ -154,11 +154,38 @@ curl http://localhost:8300/images
 - **Body**:
   ```json
   {
-    "event": {}, // Any JSON payload
-    "timeout": 120 // Timeout in seconds (optional, default: 120)
+    "event": {},
+    "timeout": 120
   }
   ```
 - Returns immediate results with output, duration, and timestamp
+
+### Invoke Function (Asynchronous)
+
+- **POST** `/invoke/{function-id}/async`
+- **Body**:
+  ```json
+  {
+    "event": {},
+    "timeout": 120
+  }
+  ```
+- Returns HTTP 202 Accepted with `invocation_id`, `status` ("PENDING"), and `created_at` timestamp.
+
+### Get Async Invocation Status & Result
+
+- **GET** `/invocations/{invocation-id}`
+- Returns the execution record, including status (`PENDING`, `RUNNING`, `COMPLETED`, `FAILED`), execution duration, and output.
+
+### List Async Invocations
+
+- **GET** `/invocations`
+- Returns an array of all async invocations.
+
+### Health Check
+
+- **GET** `/health`
+- Returns service health status `{"status": "UP"}`.
 
 ### Upload Docker Image
 
@@ -175,33 +202,48 @@ curl http://localhost:8300/images
 ### Metrics
 
 - **GET** `/metrics`
-- Returns Prometheus metrics including:
-  - `Total_Invocations`: Counter of function invocations by function name
-  - `Invocation Duration ms`: Histogram of invocation durations in milliseconds
+- Returns standard Prometheus metrics including:
+  - `mini_lambda_invocations_total`: Counter partitioned by function and status (`COMPLETED`, `FAILED`)
+  - `mini_lambda_invocation_duration_seconds`: Histogram of invocation latency in seconds
 
 ## Architecture Overview
 
+The system is structured according to idiomatic Go clean architecture principles:
+
+```
+├── cmd/
+│   └── server/               # Application binary entrypoint
+├── internal/
+│   ├── app/                  # Lifecycle and graceful shutdown manager
+│   ├── config/               # Environment-based configuration
+│   ├── domain/               # Domain entities, enums, and sentinel errors
+│   ├── handler/              # HTTP handlers, DTOs, and Gin router
+│   ├── metrics/              # Prometheus metrics collection
+│   ├── repository/           # Thread-safe storage (atomic file persistence for functions, in-memory for invocations)
+│   ├── runner/               # Container runtime (Docker SDK with stdcopy demuxing, limits, and mock runner)
+│   └── service/              # Core business services with bounded concurrency worker pool
+├── function/                 # Function storage and sample assets
+└── main.go                   # Root entrypoint for "go run ."
+```
+
 ### Function Execution Flow
 
-1. **Registration**: Functions are registered with a name and Docker image
+1. **Registration**: Functions are registered with a name and Docker image. Persisted atomically to `functions.json`.
 2. **Invocation**: When invoked, the system:
-   - Creates a new Docker container from the specified image
+   - Validates function existence and acquires a slot from the concurrency limiter
+   - Creates a new Docker container with isolated CPU and memory constraints
    - Passes the JSON payload via stdin
-   - Captures stdout/stderr as output and logs
-   - Measures execution duration
-   - Records metrics
-   - Cleans up the container
+   - Demultiplexes stdout/stderr using Docker stream headers
+   - Measures execution duration and records Prometheus metrics
+   - Enforces execution timeouts and cleans up container resources
 
-### Async Infrastructure
+### Async Infrastructure & Bounded Concurrency
 
-The system includes backend support for asynchronous invocations with:
-
-- **Invocation Status Tracking**: PENDING → RUNNING → COMPLETED/FAILED
-- **Result Storage**: Output, logs, duration, and error information
-- **Concurrent Execution**: Multiple functions can run simultaneously
-- **Thread-Safe Operations**: Mutex-protected invocation management
-
-_Note: Async API endpoints are not yet implemented but the infrastructure is ready._
+The system includes asynchronous execution with:
+- **Bounded Concurrency**: Semaphore-based worker pool preventing host Docker socket exhaustion
+- **Thread-Safe State**: Copy-on-read repository preventing race conditions during concurrent API queries
+- **Status Lifecycle**: `PENDING` → `RUNNING` → `COMPLETED` / `FAILED`
+- **Graceful Shutdown**: Traps OS termination signals and drains pending workers safely
 
 ## Creating Custom Functions
 

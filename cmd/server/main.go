@@ -1,4 +1,4 @@
-// Package main provides the root entrypoint for Mini-Lambda-System.
+// Package main provides the binary entrypoint for the server application.
 package main
 
 import (
