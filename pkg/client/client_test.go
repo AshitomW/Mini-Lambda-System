@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"AshitomW/mini-lambda/internal/domain"
+	"AshitomW/mini-lambda/pkg/certutil"
 	"AshitomW/mini-lambda/pkg/client"
 )
 
@@ -109,6 +110,31 @@ func setupMockServer(t *testing.T) (*httptest.Server, *client.Client) {
 			DurationMs: 8,
 		}
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(res)
+	})
+
+	// DLQ endpoints
+	mux.HandleFunc("/invocations/dlq", func(w http.ResponseWriter, r *http.Request) {
+		dlq := []domain.AsyncInvocation{
+			{
+				ID:         "inv-dlq-1",
+				FunctionID: "fn-1",
+				Status:     domain.StatusDeadLetter,
+				Error:      "timeout after 3 retries",
+				CreatedAt:  time.Now(),
+			},
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(dlq)
+	})
+
+	mux.HandleFunc("/invocations/inv-dlq-1/retry", func(w http.ResponseWriter, r *http.Request) {
+		res := client.AsyncInvokeResult{
+			InvocationID: "inv-dlq-1",
+			Status:       "PENDING",
+			CreatedAt:    time.Now(),
+		}
+		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(res)
 	})
 
@@ -228,5 +254,60 @@ func TestSDKSendWebhook(t *testing.T) {
 	}
 	if whRes.Status != "SUCCESS" || whRes.Result != "hook processed" {
 		t.Fatalf("unexpected webhook result: %+v", whRes)
+	}
+}
+
+func TestSDKDeadLetterQueue(t *testing.T) {
+	server, sdk := setupMockServer(t)
+	defer server.Close()
+	ctx := context.Background()
+
+	dlq, err := sdk.ListDeadLetterInvocations(ctx)
+	if err != nil {
+		t.Fatalf("ListDeadLetterInvocations failed: %v", err)
+	}
+	if len(dlq) != 1 || dlq[0].ID != "inv-dlq-1" {
+		t.Fatalf("unexpected dlq invocations: %+v", dlq)
+	}
+
+	retryRes, err := sdk.RetryDeadLetter(ctx, "inv-dlq-1")
+	if err != nil {
+		t.Fatalf("RetryDeadLetter failed: %v", err)
+	}
+	if retryRes.InvocationID != "inv-dlq-1" || retryRes.Status != "PENDING" {
+		t.Fatalf("unexpected retry result: %+v", retryRes)
+	}
+}
+
+func TestSDKSecurityOptions(t *testing.T) {
+	ctx := context.Background()
+
+	var receivedAuthHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"UP"}`))
+	}))
+	defer server.Close()
+
+	// 1. Test WithAPIKey
+	clientWithAuth := client.NewClient(server.URL, client.WithAPIKey("secret-api-token-xyz"))
+	ok, err := clientWithAuth.HealthCheck(ctx)
+	if err != nil || !ok {
+		t.Fatalf("HealthCheck failed: %v", err)
+	}
+	if receivedAuthHeader != "Bearer secret-api-token-xyz" {
+		t.Fatalf("expected Authorization header 'Bearer secret-api-token-xyz', got '%s'", receivedAuthHeader)
+	}
+
+	// 2. Test WithMutualTLS initialization
+	pki, err := certutil.GeneratePKICluster()
+	if err != nil {
+		t.Fatalf("GeneratePKICluster failed: %v", err)
+	}
+
+	clientWithMTLS := client.NewClient(server.URL, client.WithMutualTLS(pki.Client.CertPEM, pki.Client.KeyPEM, pki.CA.CertPEM))
+	if clientWithMTLS == nil {
+		t.Fatalf("expected initialized client with mTLS")
 	}
 }

@@ -9,11 +9,13 @@ import (
 
 // RegisterRequest holds the payload required to register a function.
 type RegisterRequest struct {
-	Name       string            `json:"name" binding:"required"`
-	Image      string            `json:"image" binding:"required"`
-	Env        map[string]string `json:"env,omitempty"`
-	MemoryMB   int64             `json:"memory_mb,omitempty"`
-	TimeoutSec int               `json:"timeout_sec,omitempty"`
+	Name          string            `json:"name" binding:"required"`
+	Image         string            `json:"image" binding:"required"`
+	Env           map[string]string `json:"env,omitempty"`
+	AllowNetwork  bool              `json:"allow_network,omitempty"`
+	WebhookSecret string            `json:"webhook_secret,omitempty"`
+	MemoryMB      int64             `json:"memory_mb,omitempty"`
+	TimeoutSec    int               `json:"timeout_sec,omitempty"`
 }
 
 // InvokeRequest represents the payload passed when invoking a function.

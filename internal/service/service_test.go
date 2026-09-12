@@ -218,3 +218,119 @@ func TestImageService(t *testing.T) {
 		t.Fatalf("expected at least 1 image tag")
 	}
 }
+
+func TestInvocationServiceRetryAndDLQ(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	funcRepo, err := repository.NewFileFunctionRepository(tempDir)
+	if err != nil {
+		t.Fatalf("failed to create func repo: %v", err)
+	}
+
+	invRepo := repository.NewMemoryInvocationRepository(0)
+	mockRunner := runner.NewMockRunner()
+	var invokeCount int
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, invCtx domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
+		invokeCount++
+		if invokeCount < 3 {
+			return nil, errors.New("simulated runtime crash")
+		}
+		return &domain.InvocationResult{
+			Output:     "succeeded on retry: " + string(payload),
+			DurationMs: 15,
+		}, nil
+	}
+
+	noopMetrics := metrics.NewNoopMetrics()
+	cfg := config.Config{
+		MaxConcurrentInvocations: 5,
+		DefaultTimeout:           5 * time.Second,
+		MaxTimeout:               10 * time.Second,
+		MaxRetries:               2,
+	}
+
+	funcService := service.NewFunctionService(funcRepo)
+	invService := service.NewInvocationService(funcRepo, invRepo, mockRunner, noopMetrics, cfg)
+
+	fn, err := funcService.Register(ctx, "retry-fn", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register fn: %v", err)
+	}
+
+	// 1. Invocation that succeeds after retries (attempt 1 fails, attempt 2 fails, attempt 3 succeeds)
+	inv, err := invService.InvokeAsync(ctx, fn.ID, []byte(`{"job":"retry-success"}`), domain.InvocationContext{}, 0)
+	if err != nil {
+		t.Fatalf("failed to invoke async: %v", err)
+	}
+
+	// Wait for retries (50ms + 100ms backoff)
+	time.Sleep(300 * time.Millisecond)
+
+	finalInv, err := invService.GetAsyncInvocation(ctx, inv.ID)
+	if err != nil {
+		t.Fatalf("failed to get async invocation: %v", err)
+	}
+	if finalInv.Status != domain.StatusCompleted {
+		t.Fatalf("expected COMPLETED status after retries, got %s, err: %s", finalInv.Status, finalInv.Error)
+	}
+	if finalInv.RetryCount < 2 {
+		t.Fatalf("expected at least 2 retries, got %d", finalInv.RetryCount)
+	}
+
+	// 2. Invocation that exhausts all retries and transitions to DEAD_LETTER
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, _ []byte, _ domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
+		return nil, errors.New("permanent failure")
+	}
+
+	dlqInv, err := invService.InvokeAsync(ctx, fn.ID, []byte(`{"job":"dlq-payload"}`), domain.InvocationContext{}, 0)
+	if err != nil {
+		t.Fatalf("failed to invoke async: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	failedInv, err := invService.GetAsyncInvocation(ctx, dlqInv.ID)
+	if err != nil {
+		t.Fatalf("failed to get async invocation: %v", err)
+	}
+	if failedInv.Status != domain.StatusDeadLetter {
+		t.Fatalf("expected DEAD_LETTER status, got %s", failedInv.Status)
+	}
+
+	dlqList, err := invService.ListDeadLetter(ctx)
+	if err != nil {
+		t.Fatalf("failed to list dlq: %v", err)
+	}
+	if len(dlqList) != 1 || dlqList[0].ID != dlqInv.ID {
+		t.Fatalf("expected 1 DLQ invocation with ID %s, got %+v", dlqInv.ID, dlqList)
+	}
+
+	// 3. Retry the dead-lettered message with a repaired runner
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, _ domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
+		return &domain.InvocationResult{
+			Output:     "replayed successfully: " + string(payload),
+			DurationMs: 10,
+		}, nil
+	}
+
+	retried, err := invService.RetryDeadLetter(ctx, dlqInv.ID)
+	if err != nil {
+		t.Fatalf("RetryDeadLetter failed: %v", err)
+	}
+	if retried.Status != domain.StatusPending {
+		t.Fatalf("expected PENDING status on retry, got %s", retried.Status)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	replayedInv, err := invService.GetAsyncInvocation(ctx, dlqInv.ID)
+	if err != nil {
+		t.Fatalf("failed to get replayed invocation: %v", err)
+	}
+	if replayedInv.Status != domain.StatusCompleted {
+		t.Fatalf("expected COMPLETED after DLQ replay, got %s", replayedInv.Status)
+	}
+	if replayedInv.Result == nil || replayedInv.Result.Output != `replayed successfully: {"job":"dlq-payload"}` {
+		t.Fatalf("unexpected replayed output: %+v", replayedInv.Result)
+	}
+}

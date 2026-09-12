@@ -125,6 +125,8 @@ func (s *InvocationService) InvokeAsync(ctx context.Context, identifier string, 
 		Status:         domain.StatusPending,
 		TraceID:        invCtx.TraceID,
 		CallerIdentity: invCtx.CallerIdentity,
+		Payload:        string(payload),
+		MaxRetries:     s.cfg.MaxRetries,
 		CreatedAt:      time.Now().UTC(),
 	}
 
@@ -152,8 +154,35 @@ func (s *InvocationService) runAsyncWorker(fn domain.Function, invCtx domain.Inv
 		_ = s.invRepo.Update(bgCtx, curr)
 	}
 
-	invCtx.Deadline = time.Now().Add(timeout)
-	res, err := s.runner.Invoke(bgCtx, fn, payload, invCtx, timeout)
+	maxRetries := s.cfg.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	var res *domain.InvocationResult
+	var invokeErr error
+	var attempt int
+
+	for attempt = 0; attempt <= maxRetries; attempt++ {
+		invCtx.Deadline = time.Now().Add(timeout)
+		res, invokeErr = s.runner.Invoke(bgCtx, fn, payload, invCtx, timeout)
+		if invokeErr == nil {
+			break
+		}
+
+		if attempt < maxRetries {
+			if curr, err := s.invRepo.GetByID(bgCtx, invCtx.InvocationID); err == nil {
+				curr.RetryCount = attempt + 1
+				curr.Error = invokeErr.Error()
+				_ = s.invRepo.Update(bgCtx, curr)
+			}
+			backoff := time.Duration(1<<attempt) * 50 * time.Millisecond
+			if backoff > 2*time.Second {
+				backoff = 2 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+	}
 
 	now := time.Now().UTC()
 	updated, getErr := s.invRepo.GetByID(bgCtx, invCtx.InvocationID)
@@ -162,10 +191,11 @@ func (s *InvocationService) runAsyncWorker(fn domain.Function, invCtx domain.Inv
 	}
 
 	updated.CompletedAt = &now
-	if err != nil {
-		updated.Status = domain.StatusFailed
-		updated.Error = err.Error()
-		s.metrics.RecordInvocation(fn.Name, string(domain.StatusFailed), 0)
+	if invokeErr != nil {
+		updated.Error = invokeErr.Error()
+		updated.RetryCount = attempt
+		updated.Status = domain.StatusDeadLetter
+		s.metrics.RecordInvocation(fn.Name, string(domain.StatusDeadLetter), 0)
 	} else {
 		updated.Status = domain.StatusCompleted
 		updated.Result = res
@@ -186,6 +216,56 @@ func (s *InvocationService) GetAsyncInvocation(ctx context.Context, id string) (
 // ListAsyncInvocations returns all async invocations.
 func (s *InvocationService) ListAsyncInvocations(ctx context.Context) ([]domain.AsyncInvocation, error) {
 	return s.invRepo.List(ctx)
+}
+
+// ListDeadLetter returns all async invocations currently in the Dead Letter Queue.
+func (s *InvocationService) ListDeadLetter(ctx context.Context) ([]domain.AsyncInvocation, error) {
+	return s.invRepo.ListDeadLetter(ctx)
+}
+
+// RetryDeadLetter requeues an invocation from the Dead Letter Queue for execution.
+func (s *InvocationService) RetryDeadLetter(ctx context.Context, invocationID string) (domain.AsyncInvocation, error) {
+	s.closedMu.RLock()
+	if s.isClosed {
+		s.closedMu.RUnlock()
+		return domain.AsyncInvocation{}, domain.ErrRunnerUnavailable
+	}
+	s.closedMu.RUnlock()
+
+	inv, err := s.invRepo.GetByID(ctx, invocationID)
+	if err != nil {
+		return domain.AsyncInvocation{}, err
+	}
+
+	if inv.Status != domain.StatusDeadLetter && inv.Status != domain.StatusFailed {
+		return domain.AsyncInvocation{}, domain.ErrInvalidInput
+	}
+
+	fn, err := s.funcRepo.GetByID(ctx, inv.FunctionID)
+	if err != nil {
+		return domain.AsyncInvocation{}, err
+	}
+
+	inv.Status = domain.StatusPending
+	inv.RetryCount = 0
+	inv.Error = ""
+	inv.CompletedAt = nil
+	if err := s.invRepo.Update(ctx, inv); err != nil {
+		return domain.AsyncInvocation{}, err
+	}
+
+	execTimeout := s.resolveTimeout(time.Duration(fn.TimeoutSec) * time.Second)
+	invCtx := domain.InvocationContext{
+		InvocationID:   inv.ID,
+		FunctionName:   fn.Name,
+		TraceID:        inv.TraceID,
+		CallerIdentity: inv.CallerIdentity,
+	}
+
+	s.wg.Add(1)
+	go s.runAsyncWorker(fn, invCtx, []byte(inv.Payload), execTimeout)
+
+	return inv, nil
 }
 
 // Close marks the service as closed and waits for all active background workers to finish.

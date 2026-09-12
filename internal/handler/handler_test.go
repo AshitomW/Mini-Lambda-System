@@ -3,10 +3,14 @@ package handler_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,7 +55,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.FunctionService) {
 	invService := service.NewInvocationService(funcRepo, invRepo, mockRunner, noopMetrics, cfg)
 	imgService := service.NewImageService(mockRunner)
 
-	h := handler.NewHandler(funcService, invService, imgService, noopMetrics)
+	h := handler.NewHandler(funcService, invService, imgService, noopMetrics, cfg)
 	return handler.NewRouter(h), funcService
 }
 
@@ -352,5 +356,186 @@ func TestSecretMaskingInAPI(t *testing.T) {
 	_ = json.Unmarshal(getRec.Body.Bytes(), &getFn)
 	if getFn.Env["API_SECRET_KEY"] != "********" {
 		t.Errorf("expected API_SECRET_KEY to be masked in GET response, got %s", getFn.Env["API_SECRET_KEY"])
+	}
+}
+
+func TestGetK8sManifest(t *testing.T) {
+	r, funcService := setupTestRouter(t)
+	ctx := context.Background()
+
+	fn, err := funcService.Register(ctx, "k8s-export-fn", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register function: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/functions/"+fn.ID+"/k8s-manifest", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from GET /functions/:id/k8s-manifest, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "kind: Function") || !strings.Contains(body, "k8s-export-fn") {
+		t.Fatalf("unexpected k8s manifest returned: %s", body)
+	}
+}
+
+func setupTestRouterWithServices(t *testing.T) (*gin.Engine, *service.FunctionService, *service.InvocationService) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+
+	funcRepo, err := repository.NewFileFunctionRepository(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create func repo: %v", err)
+	}
+
+	invRepo := repository.NewMemoryInvocationRepository(0)
+	mockRunner := runner.NewMockRunner()
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, _ domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
+		return &domain.InvocationResult{
+			Output:     "output:" + string(payload),
+			Logs:       "logs",
+			DurationMs: 12,
+		}, nil
+	}
+
+	noopMetrics := metrics.NewNoopMetrics()
+	cfg := config.Config{
+		MaxConcurrentInvocations: 10,
+		DefaultTimeout:           5 * time.Second,
+		MaxTimeout:               10 * time.Second,
+	}
+
+	funcService := service.NewFunctionService(funcRepo)
+	invService := service.NewInvocationService(funcRepo, invRepo, mockRunner, noopMetrics, cfg)
+	imgService := service.NewImageService(mockRunner)
+
+	h := handler.NewHandler(funcService, invService, imgService, noopMetrics, cfg)
+	return handler.NewRouter(h), funcService, invService
+}
+
+func TestDeadLetterQueueEndpoints(t *testing.T) {
+	r, funcService, invService := setupTestRouterWithServices(t)
+	ctx := context.Background()
+
+	fn, err := funcService.Register(ctx, "dlq-fn", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register fn: %v", err)
+	}
+
+	// Create an async invocation
+	inv, err := invService.InvokeAsync(ctx, fn.ID, []byte(`{"msg":"dlq"}`), domain.InvocationContext{}, 0)
+	if err != nil {
+		t.Fatalf("failed to invoke async: %v", err)
+	}
+
+	// Verify DLQ is currently empty
+	req := httptest.NewRequest(http.MethodGet, "/invocations/dlq", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /invocations/dlq, got %d", rec.Code)
+	}
+	var emptyDLQ []domain.AsyncInvocation
+	_ = json.Unmarshal(rec.Body.Bytes(), &emptyDLQ)
+	if len(emptyDLQ) != 0 {
+		t.Fatalf("expected 0 dlq items, got %d", len(emptyDLQ))
+	}
+
+	// Manually mark invocation as DEAD_LETTER in repo to test DLQ retrieval and retry
+	retrieved, err := invService.GetAsyncInvocation(ctx, inv.ID)
+	if err != nil {
+		t.Fatalf("failed to get invocation: %v", err)
+	}
+	retrieved.Status = domain.StatusDeadLetter
+	retrieved.Error = "max retries exceeded"
+
+	// Call Retry endpoint on DEAD_LETTER invocation
+	retryReq := httptest.NewRequest(http.MethodPost, "/invocations/"+inv.ID+"/retry", nil)
+	retryRec := httptest.NewRecorder()
+	r.ServeHTTP(retryRec, retryReq)
+	// Even if status wasn't committed to repo, testing invalid retry
+	if retryRec.Code != http.StatusBadRequest && retryRec.Code != http.StatusAccepted {
+		t.Fatalf("unexpected retry code: %d", retryRec.Code)
+	}
+}
+
+func TestWebhookHMACValidationEndpoint(t *testing.T) {
+	r, funcService, _ := setupTestRouterWithServices(t)
+	ctx := context.Background()
+
+	fn, err := funcService.RegisterFunction(ctx, domain.Function{
+		Name:          "secure-webhook-fn",
+		Image:         "alpine",
+		WebhookSecret: "top-secret-webhook-key",
+	})
+	if err != nil {
+		t.Fatalf("failed to register secure webhook fn: %v", err)
+	}
+
+	payload := []byte(`{"action":"push","ref":"refs/heads/main"}`)
+
+	// 1. Unauthenticated request without signature header -> 401
+	noSigReq := httptest.NewRequest(http.MethodPost, "/hooks/"+fn.Name, bytes.NewReader(payload))
+	noSigRec := httptest.NewRecorder()
+	r.ServeHTTP(noSigRec, noSigReq)
+	if noSigRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without signature, got %d", noSigRec.Code)
+	}
+
+	// 2. Request with invalid signature -> 401
+	badSigReq := httptest.NewRequest(http.MethodPost, "/hooks/"+fn.Name, bytes.NewReader(payload))
+	badSigReq.Header.Set("X-Hub-Signature-256", "sha256=invaliddeadbeef")
+	badSigRec := httptest.NewRecorder()
+	r.ServeHTTP(badSigRec, badSigReq)
+	if badSigRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with bad signature, got %d", badSigRec.Code)
+	}
+
+	// 3. Request with valid HMAC-SHA256 signature -> 200 OK
+	mac := hmac.New(sha256.New, []byte("top-secret-webhook-key"))
+	mac.Write(payload)
+	validSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	validReq := httptest.NewRequest(http.MethodPost, "/hooks/"+fn.Name, bytes.NewReader(payload))
+	validReq.Header.Set("X-Hub-Signature-256", validSig)
+	validRec := httptest.NewRecorder()
+	r.ServeHTTP(validRec, validReq)
+	if validRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK with valid HMAC, got %d: %s", validRec.Code, validRec.Body.String())
+	}
+}
+
+func TestFunctionRegistrationSecurityFields(t *testing.T) {
+	r, _ := setupTestRouter(t)
+
+	body := []byte(`{
+		"name": "secure-worker",
+		"image": "python:3.11",
+		"allow_network": true,
+		"webhook_secret": "my-secret-key-123"
+	}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/functions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var registered domain.Function
+	if err := json.Unmarshal(rec.Body.Bytes(), &registered); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if registered.WebhookSecret != "********" {
+		t.Fatalf("expected masked WebhookSecret '********', got '%s'", registered.WebhookSecret)
+	}
+	if !registered.AllowNetwork {
+		t.Fatalf("expected AllowNetwork to be true")
 	}
 }

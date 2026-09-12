@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"AshitomW/mini-lambda/internal/config"
 	"AshitomW/mini-lambda/internal/domain"
 	"AshitomW/mini-lambda/internal/metrics"
 	"AshitomW/mini-lambda/internal/service"
+	"AshitomW/mini-lambda/pkg/k8s"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,6 +21,7 @@ type Handler struct {
 	invService  *service.InvocationService
 	imgService  *service.ImageService
 	metrics     metrics.MetricsRecorder
+	cfg         config.Config
 }
 
 // NewHandler initializes a new Handler instance with the required services.
@@ -26,12 +30,14 @@ func NewHandler(
 	invService *service.InvocationService,
 	imgService *service.ImageService,
 	metrics metrics.MetricsRecorder,
+	cfg config.Config,
 ) *Handler {
 	return &Handler{
 		funcService: funcService,
 		invService:  invService,
 		imgService:  imgService,
 		metrics:     metrics,
+		cfg:         cfg,
 	}
 }
 
@@ -44,11 +50,13 @@ func (h *Handler) RegisterFunction(c *gin.Context) {
 	}
 
 	fn, err := h.funcService.RegisterFunction(c.Request.Context(), domain.Function{
-		Name:       req.Name,
-		Image:      req.Image,
-		Env:        req.Env,
-		MemoryMB:   req.MemoryMB,
-		TimeoutSec: req.TimeoutSec,
+		Name:          req.Name,
+		Image:         req.Image,
+		Env:           req.Env,
+		AllowNetwork:  req.AllowNetwork,
+		WebhookSecret: req.WebhookSecret,
+		MemoryMB:      req.MemoryMB,
+		TimeoutSec:    req.TimeoutSec,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidInput) {
@@ -124,14 +132,22 @@ func (h *Handler) InvokeSync(c *gin.Context) {
 		return
 	}
 
-	traceID := c.GetHeader("X-Request-ID")
-	if traceID == "" {
-		traceID = c.GetHeader("traceparent")
+	traceID, _ := c.Get(CtxTraceIDKey)
+	traceIDStr, _ := traceID.(string)
+	if traceIDStr == "" {
+		traceIDStr = c.GetHeader("X-Request-ID")
+		if traceIDStr == "" {
+			traceIDStr = c.GetHeader("traceparent")
+		}
 	}
 
+	callerID, _ := c.Get(CtxCallerIdentityKey)
+	callerIDStr, _ := callerID.(string)
+
 	invCtx := domain.InvocationContext{
-		TraceID:     traceID,
-		ContentType: contentType,
+		TraceID:        traceIDStr,
+		ContentType:    contentType,
+		CallerIdentity: callerIDStr,
 	}
 
 	timeout := time.Duration(req.Timeout) * time.Second
@@ -150,15 +166,15 @@ func (h *Handler) InvokeSync(c *gin.Context) {
 		return
 	}
 
-	if traceID != "" {
-		c.Header("X-Trace-ID", traceID)
+	if traceIDStr != "" {
+		c.Header("X-Trace-ID", traceIDStr)
 	}
 
 	c.JSON(http.StatusOK, SyncInvokeResponse{
 		Result:    res.Output,
 		Logs:      res.Logs,
 		Duration:  res.DurationMs,
-		TraceID:   traceID,
+		TraceID:   traceIDStr,
 		Timestamp: time.Now().UTC(),
 	})
 }
@@ -195,14 +211,22 @@ func (h *Handler) InvokeAsync(c *gin.Context) {
 		return
 	}
 
-	traceID := c.GetHeader("X-Request-ID")
-	if traceID == "" {
-		traceID = c.GetHeader("traceparent")
+	traceID, _ := c.Get(CtxTraceIDKey)
+	traceIDStr, _ := traceID.(string)
+	if traceIDStr == "" {
+		traceIDStr = c.GetHeader("X-Request-ID")
+		if traceIDStr == "" {
+			traceIDStr = c.GetHeader("traceparent")
+		}
 	}
 
+	callerID, _ := c.Get(CtxCallerIdentityKey)
+	callerIDStr, _ := callerID.(string)
+
 	invCtx := domain.InvocationContext{
-		TraceID:     traceID,
-		ContentType: contentType,
+		TraceID:        traceIDStr,
+		ContentType:    contentType,
+		CallerIdentity: callerIDStr,
 	}
 
 	timeout := time.Duration(req.Timeout) * time.Second
@@ -216,14 +240,14 @@ func (h *Handler) InvokeAsync(c *gin.Context) {
 		return
 	}
 
-	if traceID != "" {
-		c.Header("X-Trace-ID", traceID)
+	if traceIDStr != "" {
+		c.Header("X-Trace-ID", traceIDStr)
 	}
 
 	c.JSON(http.StatusAccepted, AsyncInvokeResponse{
 		InvocationID: inv.ID,
 		Status:       string(inv.Status),
-		TraceID:      traceID,
+		TraceID:      traceIDStr,
 		CreatedAt:    inv.CreatedAt,
 	})
 }
@@ -238,24 +262,52 @@ func (h *Handler) HandleWebhook(c *gin.Context) {
 		return
 	}
 
-	traceID := c.GetHeader("X-Request-ID")
-	if traceID == "" {
-		traceID = c.GetHeader("X-GitHub-Delivery")
+	fn, err := h.funcService.GetByNameOrID(c.Request.Context(), identifier)
+	if err != nil {
+		if errors.Is(err, domain.ErrFunctionNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		return
 	}
 
+	if fn.WebhookSecret != "" {
+		sigHeader := c.GetHeader("X-Hub-Signature-256")
+		if sigHeader == "" {
+			sigHeader = c.GetHeader("X-Signature-SHA256")
+		}
+		if sigHeader == "" {
+			sigHeader = c.GetHeader("X-Signature")
+		}
+		if !VerifyWebhookHMAC(fn.WebhookSecret, body, sigHeader) {
+			c.JSON(http.StatusUnauthorized, ErrorResponse{Error: "unauthorized: invalid webhook HMAC signature"})
+			return
+		}
+	}
+
+	traceID, _ := c.Get(CtxTraceIDKey)
+	traceIDStr, _ := traceID.(string)
+	if traceIDStr == "" {
+		traceIDStr = c.GetHeader("X-GitHub-Delivery")
+		if traceIDStr == "" {
+			traceIDStr = c.GetHeader("X-Request-ID")
+		}
+	}
+
+	callerID, _ := c.Get(CtxCallerIdentityKey)
+	callerIDStr, _ := callerID.(string)
+
 	invCtx := domain.InvocationContext{
-		TraceID:     traceID,
-		ContentType: c.ContentType(),
+		TraceID:        traceIDStr,
+		ContentType:    c.ContentType(),
+		CallerIdentity: callerIDStr,
 	}
 
 	isAsync := c.Query("async") == "true"
 	if isAsync {
 		inv, err := h.invService.InvokeAsync(c.Request.Context(), identifier, body, invCtx, 0)
 		if err != nil {
-			if errors.Is(err, domain.ErrFunctionNotFound) {
-				c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
-				return
-			}
 			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 			return
 		}
@@ -271,8 +323,6 @@ func (h *Handler) HandleWebhook(c *gin.Context) {
 	res, err := h.invService.InvokeSync(c.Request.Context(), identifier, body, invCtx, 0)
 	if err != nil {
 		switch {
-		case errors.Is(err, domain.ErrFunctionNotFound):
-			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
 		case errors.Is(err, domain.ErrExecutionTimeout):
 			c.JSON(http.StatusGatewayTimeout, ErrorResponse{Error: err.Error()})
 		case errors.Is(err, domain.ErrCapacityExceeded):
@@ -288,6 +338,43 @@ func (h *Handler) HandleWebhook(c *gin.Context) {
 		Function:   identifier,
 		Result:     res.Output,
 		DurationMs: res.DurationMs,
+	})
+}
+
+// ListDeadLetter returns all async invocations routed to the Dead Letter Queue.
+func (h *Handler) ListDeadLetter(c *gin.Context) {
+	dlq, err := h.invService.ListDeadLetter(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to list dead letter invocations: " + err.Error()})
+		return
+	}
+	if dlq == nil {
+		dlq = []domain.AsyncInvocation{}
+	}
+	c.JSON(http.StatusOK, dlq)
+}
+
+// RetryDeadLetter retries a failed or dead-lettered async invocation.
+func (h *Handler) RetryDeadLetter(c *gin.Context) {
+	id := c.Param("invocation_id")
+	inv, err := h.invService.RetryDeadLetter(c.Request.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvocationNotFound):
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+		case errors.Is(err, domain.ErrInvalidInput):
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invocation is not eligible for retry"})
+		default:
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to retry dead letter invocation: " + err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusAccepted, AsyncInvokeResponse{
+		InvocationID: inv.ID,
+		Status:       string(inv.Status),
+		TraceID:      inv.TraceID,
+		CreatedAt:    inv.CreatedAt,
 	})
 }
 
@@ -350,4 +437,40 @@ func (h *Handler) ListImages(c *gin.Context) {
 // HealthCheck responds with current service health status.
 func (h *Handler) HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "UP"})
+}
+
+// GetK8sManifest exports declarative Kubernetes YAML (CRD, Job, or Pod) for a function.
+func (h *Handler) GetK8sManifest(c *gin.Context) {
+	id := c.Param("id")
+	fn, err := h.funcService.GetByNameOrID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, domain.ErrFunctionNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to get function"})
+		return
+	}
+
+	format := strings.ToLower(c.DefaultQuery("format", "crd"))
+	namespace := c.DefaultQuery("namespace", "mini-lambda")
+
+	var manifest string
+	var genErr error
+
+	switch format {
+	case "job":
+		manifest, genErr = k8s.GenerateJobManifest(fn, namespace)
+	case "pod":
+		manifest, genErr = k8s.GeneratePodManifest(fn, namespace)
+	default:
+		manifest, genErr = k8s.GenerateCRDManifest(fn, namespace)
+	}
+
+	if genErr != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to generate manifest: " + genErr.Error()})
+		return
+	}
+
+	c.Data(http.StatusOK, "application/x-yaml; charset=utf-8", []byte(manifest))
 }
