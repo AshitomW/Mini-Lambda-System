@@ -84,23 +84,33 @@ func TestInvocationServiceSync(t *testing.T) {
 		t.Fatalf("failed to register function: %v", err)
 	}
 
-	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, _ time.Duration) (*domain.InvocationResult, error) {
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, invCtx domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
 		return &domain.InvocationResult{
-			Output:     "processed: " + string(payload),
+			Output:     "processed: " + string(payload) + " trace:" + invCtx.TraceID,
 			Logs:       "some logs",
 			DurationMs: 42,
 		}, nil
 	}
 
-	res, err := invService.InvokeSync(ctx, fn.ID, []byte(`{"message":"ping"}`), 2*time.Second)
+	invCtx := domain.InvocationContext{TraceID: "trace-123"}
+	res, err := invService.InvokeSync(ctx, fn.ID, []byte(`{"message":"ping"}`), invCtx, 2*time.Second)
 	if err != nil {
-		t.Fatalf("InvokeSync failed: %v", err)
+		t.Fatalf("InvokeSync by ID failed: %v", err)
 	}
-	if res.Output != `processed: {"message":"ping"}` {
+	if res.Output != `processed: {"message":"ping"} trace:trace-123` {
 		t.Fatalf("unexpected output: %s", res.Output)
 	}
 
-	_, err = invService.InvokeSync(ctx, "non-existent", []byte(`{}`), 0)
+	// Test invocation by function Name
+	resByName, err := invService.InvokeSync(ctx, "test-func", []byte(`{"message":"by-name"}`), domain.InvocationContext{}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("InvokeSync by name failed: %v", err)
+	}
+	if resByName.Output != `processed: {"message":"by-name"} trace:` {
+		t.Fatalf("unexpected output: %s", resByName.Output)
+	}
+
+	_, err = invService.InvokeSync(ctx, "non-existent", []byte(`{}`), domain.InvocationContext{}, 0)
 	if !errors.Is(err, domain.ErrFunctionNotFound) {
 		t.Fatalf("expected ErrFunctionNotFound, got %v", err)
 	}
@@ -118,19 +128,19 @@ func TestInvocationServiceCapacityLimit(t *testing.T) {
 	started := make(chan struct{})
 	block := make(chan struct{})
 
-	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, _ []byte, _ time.Duration) (*domain.InvocationResult, error) {
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, _ []byte, _ domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
 		close(started)
 		<-block
 		return &domain.InvocationResult{Output: "done"}, nil
 	}
 
 	go func() {
-		_, _ = invService.InvokeSync(ctx, fn.ID, []byte(`{}`), 5*time.Second)
+		_, _ = invService.InvokeSync(ctx, fn.ID, []byte(`{}`), domain.InvocationContext{}, 5*time.Second)
 	}()
 
 	<-started
 
-	_, err = invService.InvokeSync(ctx, fn.ID, []byte(`{}`), 5*time.Second)
+	_, err = invService.InvokeSync(ctx, fn.ID, []byte(`{}`), domain.InvocationContext{}, 5*time.Second)
 	if !errors.Is(err, domain.ErrCapacityExceeded) {
 		t.Fatalf("expected ErrCapacityExceeded when pool saturated, got %v", err)
 	}
@@ -142,21 +152,22 @@ func TestInvocationServiceAsync(t *testing.T) {
 	ctx := context.Background()
 	funcService, invService, _, mockRunner := setupTestServices(t, 5)
 
-	fn, err := funcService.Register(ctx, "async-func", "alpine")
+	_, err := funcService.Register(ctx, "async-func", "alpine")
 	if err != nil {
 		t.Fatalf("failed to register function: %v", err)
 	}
 
-	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, _ []byte, _ time.Duration) (*domain.InvocationResult, error) {
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, _ []byte, invCtx domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
 		time.Sleep(20 * time.Millisecond)
 		return &domain.InvocationResult{
-			Output:     `{"status":"ok"}`,
+			Output:     `{"status":"ok","caller":"` + invCtx.CallerIdentity + `"}`,
 			Logs:       "execution log",
 			DurationMs: 25,
 		}, nil
 	}
 
-	inv, err := invService.InvokeAsync(ctx, fn.ID, []byte(`{}`), 2*time.Second)
+	invCtx := domain.InvocationContext{CallerIdentity: "tester-app"}
+	inv, err := invService.InvokeAsync(ctx, "async-func", []byte(`{}`), invCtx, 2*time.Second)
 	if err != nil {
 		t.Fatalf("InvokeAsync failed: %v", err)
 	}
@@ -173,7 +184,7 @@ func TestInvocationServiceAsync(t *testing.T) {
 	if finalInv.Status != domain.StatusCompleted {
 		t.Fatalf("expected COMPLETED status, got %s", finalInv.Status)
 	}
-	if finalInv.Result == nil || finalInv.Result.Output != `{"status":"ok"}` {
+	if finalInv.Result == nil || finalInv.Result.Output != `{"status":"ok","caller":"tester-app"}` {
 		t.Fatalf("unexpected async result: %+v", finalInv.Result)
 	}
 

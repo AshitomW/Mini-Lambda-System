@@ -117,6 +117,24 @@ func (r *FileFunctionRepository) GetByID(_ context.Context, id string) (domain.F
 	return fn, nil
 }
 
+// GetByNameOrID returns the function matching either the provided UUID or the function name.
+func (r *FileFunctionRepository) GetByNameOrID(_ context.Context, identifier string) (domain.Function, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if fn, ok := r.items[identifier]; ok {
+		return fn, nil
+	}
+
+	for _, fn := range r.items {
+		if fn.Name == identifier {
+			return fn, nil
+		}
+	}
+
+	return domain.Function{}, domain.ErrFunctionNotFound
+}
+
 // List returns all registered functions.
 func (r *FileFunctionRepository) List(_ context.Context) ([]domain.Function, error) {
 	r.mu.RLock()

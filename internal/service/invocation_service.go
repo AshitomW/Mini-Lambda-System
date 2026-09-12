@@ -46,7 +46,7 @@ func NewInvocationService(
 }
 
 // InvokeSync executes a function synchronously within the configured execution timeout boundaries.
-func (s *InvocationService) InvokeSync(ctx context.Context, functionID string, payload []byte, timeout time.Duration) (*domain.InvocationResult, error) {
+func (s *InvocationService) InvokeSync(ctx context.Context, identifier string, payload []byte, invCtx domain.InvocationContext, timeout time.Duration) (*domain.InvocationResult, error) {
 	s.closedMu.RLock()
 	if s.isClosed {
 		s.closedMu.RUnlock()
@@ -54,12 +54,24 @@ func (s *InvocationService) InvokeSync(ctx context.Context, functionID string, p
 	}
 	s.closedMu.RUnlock()
 
-	fn, err := s.funcRepo.GetByID(ctx, functionID)
+	fn, err := s.funcRepo.GetByNameOrID(ctx, identifier)
 	if err != nil {
 		return nil, err
 	}
 
 	execTimeout := s.resolveTimeout(timeout)
+	if fn.TimeoutSec > 0 && timeout <= 0 {
+		execTimeout = s.resolveTimeout(time.Duration(fn.TimeoutSec) * time.Second)
+	}
+
+	if invCtx.InvocationID == "" {
+		invCtx.InvocationID = uuid.NewString()
+	}
+	invCtx.FunctionName = fn.Name
+	invCtx.Deadline = time.Now().Add(execTimeout)
+	if invCtx.ContentType == "" {
+		invCtx.ContentType = "application/json"
+	}
 
 	select {
 	case s.sem <- struct{}{}:
@@ -70,7 +82,7 @@ func (s *InvocationService) InvokeSync(ctx context.Context, functionID string, p
 		return nil, domain.ErrCapacityExceeded
 	}
 
-	res, err := s.runner.Invoke(ctx, fn, payload, execTimeout)
+	res, err := s.runner.Invoke(ctx, fn, payload, invCtx, execTimeout)
 	if err != nil {
 		s.metrics.RecordInvocation(fn.Name, string(domain.StatusFailed), 0)
 		return nil, err
@@ -81,7 +93,7 @@ func (s *InvocationService) InvokeSync(ctx context.Context, functionID string, p
 }
 
 // InvokeAsync registers an invocation record and dispatches execution to a background worker.
-func (s *InvocationService) InvokeAsync(ctx context.Context, functionID string, payload []byte, timeout time.Duration) (domain.AsyncInvocation, error) {
+func (s *InvocationService) InvokeAsync(ctx context.Context, identifier string, payload []byte, invCtx domain.InvocationContext, timeout time.Duration) (domain.AsyncInvocation, error) {
 	s.closedMu.RLock()
 	if s.isClosed {
 		s.closedMu.RUnlock()
@@ -89,18 +101,31 @@ func (s *InvocationService) InvokeAsync(ctx context.Context, functionID string, 
 	}
 	s.closedMu.RUnlock()
 
-	fn, err := s.funcRepo.GetByID(ctx, functionID)
+	fn, err := s.funcRepo.GetByNameOrID(ctx, identifier)
 	if err != nil {
 		return domain.AsyncInvocation{}, err
 	}
 
 	execTimeout := s.resolveTimeout(timeout)
+	if fn.TimeoutSec > 0 && timeout <= 0 {
+		execTimeout = s.resolveTimeout(time.Duration(fn.TimeoutSec) * time.Second)
+	}
+
+	if invCtx.InvocationID == "" {
+		invCtx.InvocationID = uuid.NewString()
+	}
+	invCtx.FunctionName = fn.Name
+	if invCtx.ContentType == "" {
+		invCtx.ContentType = "application/json"
+	}
 
 	inv := domain.AsyncInvocation{
-		ID:         uuid.NewString(),
-		FunctionID: fn.ID,
-		Status:     domain.StatusPending,
-		CreatedAt:  time.Now().UTC(),
+		ID:             invCtx.InvocationID,
+		FunctionID:     fn.ID,
+		Status:         domain.StatusPending,
+		TraceID:        invCtx.TraceID,
+		CallerIdentity: invCtx.CallerIdentity,
+		CreatedAt:      time.Now().UTC(),
 	}
 
 	if err := s.invRepo.Create(ctx, inv); err != nil {
@@ -108,12 +133,12 @@ func (s *InvocationService) InvokeAsync(ctx context.Context, functionID string, 
 	}
 
 	s.wg.Add(1)
-	go s.runAsyncWorker(fn, inv.ID, payload, execTimeout)
+	go s.runAsyncWorker(fn, invCtx, payload, execTimeout)
 
 	return inv, nil
 }
 
-func (s *InvocationService) runAsyncWorker(fn domain.Function, invID string, payload []byte, timeout time.Duration) {
+func (s *InvocationService) runAsyncWorker(fn domain.Function, invCtx domain.InvocationContext, payload []byte, timeout time.Duration) {
 	defer s.wg.Done()
 
 	s.sem <- struct{}{}
@@ -121,16 +146,17 @@ func (s *InvocationService) runAsyncWorker(fn domain.Function, invID string, pay
 
 	bgCtx := context.Background()
 
-	curr, err := s.invRepo.GetByID(bgCtx, invID)
+	curr, err := s.invRepo.GetByID(bgCtx, invCtx.InvocationID)
 	if err == nil {
 		curr.Status = domain.StatusRunning
 		_ = s.invRepo.Update(bgCtx, curr)
 	}
 
-	res, err := s.runner.Invoke(bgCtx, fn, payload, timeout)
+	invCtx.Deadline = time.Now().Add(timeout)
+	res, err := s.runner.Invoke(bgCtx, fn, payload, invCtx, timeout)
 
 	now := time.Now().UTC()
-	updated, getErr := s.invRepo.GetByID(bgCtx, invID)
+	updated, getErr := s.invRepo.GetByID(bgCtx, invCtx.InvocationID)
 	if getErr != nil {
 		return
 	}

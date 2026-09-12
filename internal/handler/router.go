@@ -18,6 +18,7 @@ func NewRouter(h *Handler) *gin.Engine {
 
 	r.POST("/invoke/:id", h.InvokeSync)
 	r.POST("/invoke/:id/async", h.InvokeAsync)
+	r.POST("/hooks/:identifier", h.HandleWebhook)
 
 	r.GET("/invocations/:invocation_id", h.GetAsyncInvocation)
 	r.POST("/invocations/:invocation_id", h.GetAsyncInvocation)
