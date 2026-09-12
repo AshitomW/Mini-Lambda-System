@@ -15,6 +15,7 @@ func NewRouter(h *Handler) *gin.Engine {
 	r.POST("/functions", h.RegisterFunction)
 	r.GET("/functions", h.ListFunctions)
 	r.GET("/functions/:id", h.GetFunction)
+	r.GET("/functions/:id/k8s-manifest", h.GetK8sManifest)
 
 	r.POST("/invoke/:id", h.InvokeSync)
 	r.POST("/invoke/:id/async", h.InvokeAsync)

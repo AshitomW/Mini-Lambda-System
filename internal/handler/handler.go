@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"AshitomW/mini-lambda/internal/domain"
 	"AshitomW/mini-lambda/internal/metrics"
 	"AshitomW/mini-lambda/internal/service"
+	"AshitomW/mini-lambda/pkg/k8s"
 	"github.com/gin-gonic/gin"
 )
 
@@ -350,4 +352,40 @@ func (h *Handler) ListImages(c *gin.Context) {
 // HealthCheck responds with current service health status.
 func (h *Handler) HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "UP"})
+}
+
+// GetK8sManifest exports declarative Kubernetes YAML (CRD, Job, or Pod) for a function.
+func (h *Handler) GetK8sManifest(c *gin.Context) {
+	id := c.Param("id")
+	fn, err := h.funcService.GetByNameOrID(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, domain.ErrFunctionNotFound) {
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to get function"})
+		return
+	}
+
+	format := strings.ToLower(c.DefaultQuery("format", "crd"))
+	namespace := c.DefaultQuery("namespace", "mini-lambda")
+
+	var manifest string
+	var genErr error
+
+	switch format {
+	case "job":
+		manifest, genErr = k8s.GenerateJobManifest(fn, namespace)
+	case "pod":
+		manifest, genErr = k8s.GeneratePodManifest(fn, namespace)
+	default:
+		manifest, genErr = k8s.GenerateCRDManifest(fn, namespace)
+	}
+
+	if genErr != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to generate manifest: " + genErr.Error()})
+		return
+	}
+
+	c.Data(http.StatusOK, "application/x-yaml; charset=utf-8", []byte(manifest))
 }

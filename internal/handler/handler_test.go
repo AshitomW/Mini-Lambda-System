@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,5 +353,28 @@ func TestSecretMaskingInAPI(t *testing.T) {
 	_ = json.Unmarshal(getRec.Body.Bytes(), &getFn)
 	if getFn.Env["API_SECRET_KEY"] != "********" {
 		t.Errorf("expected API_SECRET_KEY to be masked in GET response, got %s", getFn.Env["API_SECRET_KEY"])
+	}
+}
+
+func TestGetK8sManifest(t *testing.T) {
+	r, funcService := setupTestRouter(t)
+	ctx := context.Background()
+
+	fn, err := funcService.Register(ctx, "k8s-export-fn", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register function: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/functions/"+fn.ID+"/k8s-manifest", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from GET /functions/:id/k8s-manifest, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "kind: Function") || !strings.Contains(body, "k8s-export-fn") {
+		t.Fatalf("unexpected k8s manifest returned: %s", body)
 	}
 }
