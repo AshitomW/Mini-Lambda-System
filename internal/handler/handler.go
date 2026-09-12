@@ -43,7 +43,13 @@ func (h *Handler) RegisterFunction(c *gin.Context) {
 		return
 	}
 
-	fn, err := h.funcService.Register(c.Request.Context(), req.Name, req.Image)
+	fn, err := h.funcService.RegisterFunction(c.Request.Context(), domain.Function{
+		Name:       req.Name,
+		Image:      req.Image,
+		Env:        req.Env,
+		MemoryMB:   req.MemoryMB,
+		TimeoutSec: req.TimeoutSec,
+	})
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidInput) {
 			c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
@@ -53,23 +59,28 @@ func (h *Handler) RegisterFunction(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, fn)
+	c.JSON(http.StatusCreated, fn.Sanitize())
 }
 
-// ListFunctions returns all registered functions.
+// ListFunctions returns all registered functions with secrets redacted.
 func (h *Handler) ListFunctions(c *gin.Context) {
 	list, err := h.funcService.List(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to list functions"})
 		return
 	}
-	c.JSON(http.StatusOK, list)
+
+	sanitized := make([]domain.Function, 0, len(list))
+	for _, fn := range list {
+		sanitized = append(sanitized, fn.Sanitize())
+	}
+	c.JSON(http.StatusOK, sanitized)
 }
 
-// GetFunction retrieves a single function by ID.
+// GetFunction retrieves a single function by ID or Name with secrets redacted.
 func (h *Handler) GetFunction(c *gin.Context) {
 	id := c.Param("id")
-	fn, err := h.funcService.GetByID(c.Request.Context(), id)
+	fn, err := h.funcService.GetByNameOrID(c.Request.Context(), id)
 	if err != nil {
 		if errors.Is(err, domain.ErrFunctionNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
@@ -78,7 +89,7 @@ func (h *Handler) GetFunction(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to get function"})
 		return
 	}
-	c.JSON(http.StatusOK, fn)
+	c.JSON(http.StatusOK, fn.Sanitize())
 }
 
 // InvokeSync executes a function synchronously.
@@ -91,14 +102,40 @@ func (h *Handler) InvokeSync(c *gin.Context) {
 		return
 	}
 
-	payload, err := json.Marshal(req.Event)
+	var payload []byte
+	var err error
+	contentType := "application/json"
+
+	if req.CloudEvent != nil {
+		if valErr := req.CloudEvent.Validate(); valErr != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid cloud event envelope: required fields missing"})
+			return
+		}
+		payload, err = json.Marshal(req.CloudEvent)
+		if req.CloudEvent.ContentType != "" {
+			contentType = req.CloudEvent.ContentType
+		}
+	} else {
+		payload, err = json.Marshal(req.Event)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "failed to encode event payload"})
 		return
 	}
 
+	traceID := c.GetHeader("X-Request-ID")
+	if traceID == "" {
+		traceID = c.GetHeader("traceparent")
+	}
+
+	invCtx := domain.InvocationContext{
+		TraceID:     traceID,
+		ContentType: contentType,
+	}
+
 	timeout := time.Duration(req.Timeout) * time.Second
-	res, err := h.invService.InvokeSync(c.Request.Context(), id, payload, timeout)
+	res, err := h.invService.InvokeSync(c.Request.Context(), id, payload, invCtx, timeout)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrFunctionNotFound):
@@ -113,10 +150,15 @@ func (h *Handler) InvokeSync(c *gin.Context) {
 		return
 	}
 
+	if traceID != "" {
+		c.Header("X-Trace-ID", traceID)
+	}
+
 	c.JSON(http.StatusOK, SyncInvokeResponse{
 		Result:    res.Output,
 		Logs:      res.Logs,
 		Duration:  res.DurationMs,
+		TraceID:   traceID,
 		Timestamp: time.Now().UTC(),
 	})
 }
@@ -131,14 +173,40 @@ func (h *Handler) InvokeAsync(c *gin.Context) {
 		return
 	}
 
-	payload, err := json.Marshal(req.Event)
+	var payload []byte
+	var err error
+	contentType := "application/json"
+
+	if req.CloudEvent != nil {
+		if valErr := req.CloudEvent.Validate(); valErr != nil {
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid cloud event envelope: required fields missing"})
+			return
+		}
+		payload, err = json.Marshal(req.CloudEvent)
+		if req.CloudEvent.ContentType != "" {
+			contentType = req.CloudEvent.ContentType
+		}
+	} else {
+		payload, err = json.Marshal(req.Event)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "failed to encode event payload"})
 		return
 	}
 
+	traceID := c.GetHeader("X-Request-ID")
+	if traceID == "" {
+		traceID = c.GetHeader("traceparent")
+	}
+
+	invCtx := domain.InvocationContext{
+		TraceID:     traceID,
+		ContentType: contentType,
+	}
+
 	timeout := time.Duration(req.Timeout) * time.Second
-	inv, err := h.invService.InvokeAsync(c.Request.Context(), id, payload, timeout)
+	inv, err := h.invService.InvokeAsync(c.Request.Context(), id, payload, invCtx, timeout)
 	if err != nil {
 		if errors.Is(err, domain.ErrFunctionNotFound) {
 			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
@@ -148,10 +216,78 @@ func (h *Handler) InvokeAsync(c *gin.Context) {
 		return
 	}
 
+	if traceID != "" {
+		c.Header("X-Trace-ID", traceID)
+	}
+
 	c.JSON(http.StatusAccepted, AsyncInvokeResponse{
 		InvocationID: inv.ID,
 		Status:       string(inv.Status),
+		TraceID:      traceID,
 		CreatedAt:    inv.CreatedAt,
+	})
+}
+
+// HandleWebhook ingests direct HTTP webhooks and forwards payloads to the target function.
+func (h *Handler) HandleWebhook(c *gin.Context) {
+	identifier := c.Param("identifier")
+
+	body, err := c.GetRawData()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "failed to read webhook body: " + err.Error()})
+		return
+	}
+
+	traceID := c.GetHeader("X-Request-ID")
+	if traceID == "" {
+		traceID = c.GetHeader("X-GitHub-Delivery")
+	}
+
+	invCtx := domain.InvocationContext{
+		TraceID:     traceID,
+		ContentType: c.ContentType(),
+	}
+
+	isAsync := c.Query("async") == "true"
+	if isAsync {
+		inv, err := h.invService.InvokeAsync(c.Request.Context(), identifier, body, invCtx, 0)
+		if err != nil {
+			if errors.Is(err, domain.ErrFunctionNotFound) {
+				c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusAccepted, WebhookInvokeResponse{
+			Status:       "ACCEPTED",
+			Function:     identifier,
+			InvocationID: inv.ID,
+		})
+		return
+	}
+
+	res, err := h.invService.InvokeSync(c.Request.Context(), identifier, body, invCtx, 0)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrFunctionNotFound):
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: err.Error()})
+		case errors.Is(err, domain.ErrExecutionTimeout):
+			c.JSON(http.StatusGatewayTimeout, ErrorResponse{Error: err.Error()})
+		case errors.Is(err, domain.ErrCapacityExceeded):
+			c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, WebhookInvokeResponse{
+		Status:     "SUCCESS",
+		Function:   identifier,
+		Result:     res.Output,
+		DurationMs: res.DurationMs,
 	})
 }
 

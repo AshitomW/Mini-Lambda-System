@@ -32,7 +32,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *service.FunctionService) {
 
 	invRepo := repository.NewMemoryInvocationRepository(0)
 	mockRunner := runner.NewMockRunner()
-	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, _ time.Duration) (*domain.InvocationResult, error) {
+	mockRunner.InvokeFunc = func(_ context.Context, _ domain.Function, payload []byte, _ domain.InvocationContext, _ time.Duration) (*domain.InvocationResult, error) {
 		return &domain.InvocationResult{
 			Output:     "output:" + string(payload),
 			Logs:       "logs",
@@ -225,5 +225,132 @@ func TestImagesHandlers(t *testing.T) {
 
 	if uploadRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK from POST /images, got %d, body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+}
+
+func TestInvokeByName(t *testing.T) {
+	r, funcService := setupTestRouter(t)
+	ctx := context.Background()
+
+	_, err := funcService.Register(ctx, "named-func", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register function: %v", err)
+	}
+
+	body := []byte(`{"event":{"hello":"world"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/invoke/named-func", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK when invoking by name, got %d", rec.Code)
+	}
+}
+
+func TestInvokeCloudEvent(t *testing.T) {
+	r, funcService := setupTestRouter(t)
+	ctx := context.Background()
+
+	fn, err := funcService.Register(ctx, "ce-func", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register function: %v", err)
+	}
+
+	body := []byte(`{
+		"cloud_event": {
+			"specversion": "1.0",
+			"id": "event-123",
+			"source": "http://client.test",
+			"type": "com.test.ping",
+			"time": "2026-01-01T00:00:00Z",
+			"datacontenttype": "application/json",
+			"data": {"ping": true}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/invoke/"+fn.ID, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for CloudEvent, got %d, body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWebhookEndpoint(t *testing.T) {
+	r, funcService := setupTestRouter(t)
+	ctx := context.Background()
+
+	_, err := funcService.Register(ctx, "webhook-target", "alpine")
+	if err != nil {
+		t.Fatalf("failed to register function: %v", err)
+	}
+
+	// Sync webhook
+	req := httptest.NewRequest(http.MethodPost, "/hooks/webhook-target", bytes.NewReader([]byte(`{"action":"push"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-hook-1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for sync webhook, got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp handler.WebhookInvokeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal webhook response: %v", err)
+	}
+	if resp.Status != "SUCCESS" || resp.Function != "webhook-target" {
+		t.Fatalf("unexpected webhook response: %+v", resp)
+	}
+
+	// Async webhook
+	asyncReq := httptest.NewRequest(http.MethodPost, "/hooks/webhook-target?async=true", bytes.NewReader([]byte(`raw payload`)))
+	asyncRec := httptest.NewRecorder()
+	r.ServeHTTP(asyncRec, asyncReq)
+
+	if asyncRec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted for async webhook, got %d", asyncRec.Code)
+	}
+}
+
+func TestSecretMaskingInAPI(t *testing.T) {
+	r, _ := setupTestRouter(t)
+
+	regBody := []byte(`{
+		"name": "secret-fn",
+		"image": "alpine",
+		"env": {
+			"DATABASE_URL": "postgres://user:pass@localhost/db",
+			"API_SECRET_KEY": "supersecretpassword123",
+			"SERVICE_PORT": "3000"
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/functions", bytes.NewReader(regBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", rec.Code)
+	}
+
+	var fn domain.Function
+	_ = json.Unmarshal(rec.Body.Bytes(), &fn)
+	if fn.Env["API_SECRET_KEY"] != "********" {
+		t.Errorf("expected API_SECRET_KEY to be masked in creation response, got %s", fn.Env["API_SECRET_KEY"])
+	}
+
+	// Verify GET /functions/:id also masks secrets
+	getReq := httptest.NewRequest(http.MethodGet, "/functions/"+fn.ID, nil)
+	getRec := httptest.NewRecorder()
+	r.ServeHTTP(getRec, getReq)
+
+	var getFn domain.Function
+	_ = json.Unmarshal(getRec.Body.Bytes(), &getFn)
+	if getFn.Env["API_SECRET_KEY"] != "********" {
+		t.Errorf("expected API_SECRET_KEY to be masked in GET response, got %s", getFn.Env["API_SECRET_KEY"])
 	}
 }

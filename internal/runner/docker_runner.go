@@ -32,15 +32,33 @@ func NewDockerRunner(cfg config.Config) (*DockerRunner, error) {
 	}, nil
 }
 
-// Invoke executes a function inside an isolated Docker container with resource boundaries and timeout control.
-func (r *DockerRunner) Invoke(ctx context.Context, fn domain.Function, payload []byte, timeout time.Duration) (*domain.InvocationResult, error) {
+// Invoke executes a function inside an isolated Docker container with resource boundaries, environment injection, and timeout control.
+func (r *DockerRunner) Invoke(ctx context.Context, fn domain.Function, payload []byte, invCtx domain.InvocationContext, timeout time.Duration) (*domain.InvocationResult, error) {
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
 
+	// Merge function-level environment variables into invocation context if needed
+	if len(fn.Env) > 0 {
+		if invCtx.Env == nil {
+			invCtx.Env = make(map[string]string, len(fn.Env))
+		}
+		for k, v := range fn.Env {
+			if _, exists := invCtx.Env[k]; !exists {
+				invCtx.Env[k] = v
+			}
+		}
+	}
+
+	memLimit := r.cfg.MemoryLimitBytes
+	if fn.MemoryMB > 0 {
+		memLimit = fn.MemoryMB * 1024 * 1024
+	}
+
 	resp, err := r.client.ContainerCreate(execCtx, &container.Config{
 		Image:        fn.Image,
+		Env:          invCtx.ToEnvSlice(),
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -48,7 +66,7 @@ func (r *DockerRunner) Invoke(ctx context.Context, fn domain.Function, payload [
 		StdinOnce:    true,
 	}, &container.HostConfig{
 		Resources: container.Resources{
-			Memory:   r.cfg.MemoryLimitBytes,
+			Memory:    memLimit,
 			CPUShares: r.cfg.CPUShares,
 		},
 	}, nil, nil, "")

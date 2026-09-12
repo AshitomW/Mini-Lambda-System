@@ -11,6 +11,7 @@ import (
 type FunctionRepository interface {
 	Save(ctx context.Context, fn domain.Function) error
 	GetByID(ctx context.Context, id string) (domain.Function, error)
+	GetByNameOrID(ctx context.Context, identifier string) (domain.Function, error)
 	List(ctx context.Context) ([]domain.Function, error)
 }
 

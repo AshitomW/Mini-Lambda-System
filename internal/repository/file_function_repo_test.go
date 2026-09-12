@@ -120,3 +120,48 @@ func TestFileFunctionRepositoryCorruptedFile(t *testing.T) {
 		t.Fatalf("expected error loading corrupted file, got nil")
 	}
 }
+
+func TestFileFunctionRepositoryGetByNameOrID(t *testing.T) {
+	tempDir := t.TempDir()
+	ctx := context.Background()
+
+	repo, err := repository.NewFileFunctionRepository(tempDir)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+
+	fn := domain.Function{
+		ID:        "550e8400-e29b-41d4-a716-446655440000",
+		Name:      "user-service",
+		Image:     "python:alpine",
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := repo.Save(ctx, fn); err != nil {
+		t.Fatalf("failed to save function: %v", err)
+	}
+
+	// Lookup by ID
+	byID, err := repo.GetByNameOrID(ctx, "550e8400-e29b-41d4-a716-446655440000")
+	if err != nil {
+		t.Fatalf("failed to get by ID: %v", err)
+	}
+	if byID.Name != "user-service" {
+		t.Errorf("expected name user-service, got %s", byID.Name)
+	}
+
+	// Lookup by Name
+	byName, err := repo.GetByNameOrID(ctx, "user-service")
+	if err != nil {
+		t.Fatalf("failed to get by Name: %v", err)
+	}
+	if byName.ID != fn.ID {
+		t.Errorf("expected ID %s, got %s", fn.ID, byName.ID)
+	}
+
+	// Lookup non-existent
+	_, err = repo.GetByNameOrID(ctx, "non-existent")
+	if !errors.Is(err, domain.ErrFunctionNotFound) {
+		t.Errorf("expected ErrFunctionNotFound, got %v", err)
+	}
+}

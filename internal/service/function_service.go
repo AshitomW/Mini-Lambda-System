@@ -23,12 +23,22 @@ func NewFunctionService(repo repository.FunctionRepository) *FunctionService {
 
 // Register validates and registers a new function.
 func (s *FunctionService) Register(ctx context.Context, name, image string) (domain.Function, error) {
-	fn := domain.Function{
-		ID:        uuid.NewString(),
-		Name:      strings.TrimSpace(name),
-		Image:     strings.TrimSpace(image),
-		CreatedAt: time.Now().UTC(),
+	return s.RegisterFunction(ctx, domain.Function{
+		Name:  name,
+		Image: image,
+	})
+}
+
+// RegisterFunction validates and stores a function definition with full configuration support.
+func (s *FunctionService) RegisterFunction(ctx context.Context, fn domain.Function) (domain.Function, error) {
+	if fn.ID == "" {
+		fn.ID = uuid.NewString()
 	}
+	fn.Name = strings.TrimSpace(fn.Name)
+	fn.Image = strings.TrimSpace(fn.Image)
+	now := time.Now().UTC()
+	fn.CreatedAt = now
+	fn.UpdatedAt = now
 
 	if err := fn.Validate(); err != nil {
 		return domain.Function{}, err
@@ -47,6 +57,14 @@ func (s *FunctionService) GetByID(ctx context.Context, id string) (domain.Functi
 		return domain.Function{}, domain.ErrInvalidInput
 	}
 	return s.repo.GetByID(ctx, id)
+}
+
+// GetByNameOrID looks up a function by either its unique UUID or name.
+func (s *FunctionService) GetByNameOrID(ctx context.Context, identifier string) (domain.Function, error) {
+	if strings.TrimSpace(identifier) == "" {
+		return domain.Function{}, domain.ErrInvalidInput
+	}
+	return s.repo.GetByNameOrID(ctx, identifier)
 }
 
 // List returns all registered functions.
