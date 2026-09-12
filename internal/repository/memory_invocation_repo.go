@@ -70,3 +70,17 @@ func (r *MemoryInvocationRepository) List(_ context.Context) ([]domain.AsyncInvo
 
 	return result, nil
 }
+
+// ListDeadLetter returns all async invocations that have been routed to the Dead Letter Queue.
+func (r *MemoryInvocationRepository) ListDeadLetter(_ context.Context) ([]domain.AsyncInvocation, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var dlq []domain.AsyncInvocation
+	for _, inv := range r.items {
+		if inv.Status == domain.StatusDeadLetter {
+			dlq = append(dlq, inv.Clone())
+		}
+	}
+	return dlq, nil
+}

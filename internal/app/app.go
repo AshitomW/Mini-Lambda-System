@@ -47,7 +47,7 @@ func Run() error {
 
 	imgService := service.NewImageService(dockerRunner)
 
-	h := handler.NewHandler(funcService, invService, imgService, promMetrics)
+	h := handler.NewHandler(funcService, invService, imgService, promMetrics, cfg)
 	r := handler.NewRouter(h)
 
 	addr := cfg.Port
@@ -55,9 +55,15 @@ func Run() error {
 		addr = ":" + addr
 	}
 
+	tlsConfig, err := SetupTLSConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure TLS/mTLS: %w", err)
+	}
+
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      r,
+		TLSConfig:    tlsConfig,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -66,9 +72,16 @@ func Run() error {
 	serverErrors := make(chan error, 1)
 
 	go func() {
-		log.Printf("Mini-Lambda server listening on %s", addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrors <- err
+		if tlsConfig != nil && len(tlsConfig.Certificates) > 0 {
+			log.Printf("Mini-Lambda server listening securely with TLS/mTLS on %s", addr)
+			if err := server.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverErrors <- err
+			}
+		} else {
+			log.Printf("Mini-Lambda server listening on %s", addr)
+			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverErrors <- err
+			}
 		}
 	}()
 

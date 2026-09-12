@@ -17,6 +17,9 @@ const (
 
 	// StatusFailed indicates the invocation ended with an error or timeout.
 	StatusFailed InvocationStatus = "FAILED"
+
+	// StatusDeadLetter indicates the invocation exhausted all retry attempts and was routed to the Dead Letter Queue.
+	StatusDeadLetter InvocationStatus = "DEAD_LETTER"
 )
 
 // InvocationResult holds output and telemetry produced by a function run.
@@ -33,6 +36,9 @@ type AsyncInvocation struct {
 	Status         InvocationStatus  `json:"status"`
 	Result         *InvocationResult `json:"result,omitempty"`
 	Error          string            `json:"error,omitempty"`
+	RetryCount     int               `json:"retry_count"`
+	MaxRetries     int               `json:"max_retries"`
+	Payload        string            `json:"payload,omitempty"`
 	TraceID        string            `json:"trace_id,omitempty"`
 	CallerIdentity string            `json:"caller_identity,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
